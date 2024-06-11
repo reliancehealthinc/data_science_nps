@@ -1,6 +1,8 @@
 import pandas as pd
 from transformers import pipeline
-from snowflake_utils import get_snowflake_connection, load_data, upload_data
+import os,sys
+sys.path.insert(0, os.getenv('SNOWFLAKE_UTILS_PATH'))
+from data_science_utils import getcode, get_connection, upload_large_table
 
 class NPSProcessor:
     def __init__(self, database, schema, role, warehouse, chunk_size=100):
@@ -15,18 +17,18 @@ class NPSProcessor:
         chunk_size (int): The number of rows to process in each chunk. Default is 100.
         """
         print("Initializing NPSProcessor...")
-        self.connection = get_snowflake_connection(database=database, schema=schema, role=role, warehouse=warehouse)
+        self.connection = get_connection(database=database, schema=schema, role=role, warehouse=warehouse)
         self.classifier = pipeline("zero-shot-classification", model="facebook/bart-large-mnli", device='mps')
         self.chunk_size = chunk_size
         print("NPSProcessor initialized.")
        
-    def load_data(self):
+    def getcode(self):
         """
         Load data from Snowflake into DataFrames.
         """
         print("Loading data from Snowflake...")
-        self.provider_ranking_nps = load_data(self.connection, "SELECT * FROM DATA_SCIENCE_DB.PUBLIC.PROVIDER_RANKING_FINAL")
-        self.nps_data = load_data(self.connection, "SELECT * FROM DATA_SCIENCE_DB.PUBLIC.NPS_PROVIDER_RAW")
+        self.provider_ranking_nps = getcode(self.connection, "SELECT * FROM DATA_SCIENCE_DB.PUBLIC.PROVIDER_RANKING_FINAL")
+        self.nps_data = getcode(self.connection, "SELECT * FROM DATA_SCIENCE_DB.PUBLIC.NPS_PROVIDER_RAW")
         print("Data loading completed.")
     
     def preprocess_data(self):
@@ -210,5 +212,5 @@ class NPSProcessor:
         """
         print(f"Saving results to {file_name}...")
         self.final_df.to_csv(file_name, index=False)
-        upload_data(self.connection, self.final_df, 'NPS_QA_OP', if_exists='replace')
+        upgetcode(self.connection, self.final_df, 'NPS_QA_OP', if_exists='replace')
         print("Results saved and uploaded successfully.")
