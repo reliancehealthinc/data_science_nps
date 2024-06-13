@@ -53,12 +53,16 @@ class NPSProcessor:
         nps_query = f"""
         SELECT 
             * 
-        FROM DATA_SCIENCE_DB.PUBLIC.NPS_PROVIDER_RAW
-        <inc_start> WHERE Encounter_date > '{last_encounter_date}' <inc_end>
+        FROM DATA_SCIENCE_DB.PUBLIC.NPS_PROVIDER_RAW A
+        <inc_start> 
+        WHERE Encounter_date > (SELECT MAX(Encounter_date) FROM FINAL_NPS_OP)
+        <inc_end>
         ORDER BY Encounter_date ASC
         """
 
         self.nps_data  = getcode(nps_query,incremental=self.incremental,connection=connection)
+        min_encounter_date = np.min(nps_data['Eecounter_date'])
+        print(f'Updating Table. Starting From {min_encounter_date}')
 
         # Incremental load for PROVIDER_RANKING_FINAL based on provider_id
         provider_ranking_query = "SELECT id as provider_id FROM DATA_SCIENCE_DB.PUBLIC.PROVIDER_DOMAIN"
