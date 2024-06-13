@@ -1,10 +1,15 @@
 import pandas as pd
+from datetime import datetime
 from transformers import pipeline
 import os,sys
 sys.path.insert(0, os.getenv('SNOWFLAKE_UTILS_PATH'))
 from data_science_utils import getcode, get_connection, upload_large_table
 
+schema = 'public'
+profile = 'dev'
+incremental = True
 class NPSProcessor:
+    
     def __init__(self, database, schema, role, warehouse, chunk_size=100):
         """
         Initialize the NPSProcessor with Snowflake connection details and setup the classifier.
@@ -20,15 +25,60 @@ class NPSProcessor:
         self.connection = get_connection(database=database, schema=schema, role=role, warehouse=warehouse)
         self.classifier = pipeline("zero-shot-classification", model="facebook/bart-large-mnli", device='mps')
         self.chunk_size = chunk_size
+        self.provider_ranking_nps = pd.DataFrame()  # Initialize as an empty DataFrame
+        self.nps_data = pd.DataFrame()   
         print("NPSProcessor initialized.")
        
+    # def getcode(self):
+    #     """
+    #     Load data from Snowflake into DataFrames.
+    #     """
+    #     print("Loading data from Snowflake...")
+    #     self.nps_data = getcode("SELECT * FROM DATA_SCIENCE_DB.PUBLIC.NPS_PROVIDER_RAW")
+
+    #     self.provider_ranking_nps = getcode("SELECT * FROM DATA_SCIENCE_DB.PUBLIC.PROVIDER_RANKING_FINAL")
+    #     print("Data loading completed.")
+
+
+
     def getcode(self):
         """
-        Load data from Snowflake into DataFrames.
+        Load data from Snowflake into DataFrames incrementally.
         """
         print("Loading data from Snowflake...")
-        self.provider_ranking_nps = getcode(self.connection, "SELECT * FROM DATA_SCIENCE_DB.PUBLIC.PROVIDER_RANKING_FINAL")
-        self.nps_data = getcode(self.connection, "SELECT * FROM DATA_SCIENCE_DB.PUBLIC.NPS_PROVIDER_RAW")
+
+        # Fetch the latest provider_id and encounter_date from existing data if available
+        last_provider_id = None
+        last_encounter_date = None
+
+        if not self.nps_data.empty:
+            last_encounter_date = self.nps_data['Encounter_date'].max()
+            print(f"Last encounter_date in existing data: {last_encounter_date}")
+
+        # Incremental load for NPS_PROVIDER_RAW based on Encounter_date
+        nps_query = f"""
+        SELECT 
+            * 
+        FROM DATA_SCIENCE_DB.PUBLIC.NPS_PROVIDER_RAW
+        <inc_start> WHERE Encounter_date > '{last_encounter_date}' <inc_end>
+        ORDER BY Encounter_date ASC
+        """
+        if last_encounter_date:
+            incremental = True
+        else:
+            incremental = False
+
+        new_nps_data = getcode(nps_query,incremental=incremental)
+
+        if not new_nps_data.empty:
+            print(f"New records loaded from NPS_PROVIDER_RAW: {len(new_nps_data)}")
+            self.nps_data = pd.concat([self.nps_data, new_nps_data], ignore_index=True)
+
+        # Incremental load for PROVIDER_RANKING_FINAL based on provider_id
+        provider_ranking_query = "SELECT id as provider_id FROM DATA_SCIENCE_DB.PUBLIC.PROVIDER_DOMAIN"
+        new_provider_ranking_nps = getcode(provider_ranking_query)
+
+
         print("Data loading completed.")
     
     def preprocess_data(self):
@@ -203,14 +253,17 @@ class NPSProcessor:
         self.final_df['sub_topic'] = self.final_df['sub_topic'].replace('', 'generic')
         print("Processing classifications completed.")
     
-    def save_results(self, file_name):
+    def save_results(self):
+        
         """
         Save the final results to a CSV file and upload to Snowflake.
 
         Parameters:
         file_name (str): The name of the file to save the results.
         """
-        print(f"Saving results to {file_name}...")
-        self.final_df.to_csv(file_name, index=False)
-        upgetcode(self.connection, self.final_df, 'NPS_QA_OP', if_exists='replace')
-        print("Results saved and uploaded successfully.")
+
+        with get_connection(schema=schema, profile=profile) as connection:
+            if incremental is True:
+                upload_large_table(connection,final_df,'FINAL_NPS_OP',schema=schema,if_exists='append')
+            else:
+                upload_large_table(connection,final_df,'FINAL_NPS_OP',schema=schema,if_exists='replace')
