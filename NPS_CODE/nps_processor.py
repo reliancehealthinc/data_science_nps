@@ -67,6 +67,7 @@ class NPSProcessor:
             AND B.type_service = C.type_service
         WHERE C.customer_response IS NULL
         <inc_end>
+        LIMIT 1000
         """
 
         nps_data  = getcode(nps_query,incremental=self.incremental,connection=self.connection)
