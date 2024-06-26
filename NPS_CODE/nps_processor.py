@@ -9,9 +9,11 @@ from data_science_utils import getcode, get_connection, upload_large_table
 schema = 'public'
 profile = 'dev'
 
+
+
 class NPSProcessor:
     
-    def __init__(self, database, schema, role, warehouse, chunk_size=100, incremental=True):
+    def __init__(self, database, schema, role, warehouse, chunk_size=5, incremental=True):
         """
         Initialize the NPSProcessor with Snowflake connection details and setup the classifier.
 
@@ -67,7 +69,6 @@ class NPSProcessor:
             AND B.type_service = C.type_service
         WHERE C.customer_response IS NULL
         <inc_end>
-        LIMIT 1000
         """
 
         nps_data  = getcode(nps_query,incremental=self.incremental,connection=self.connection)
@@ -86,7 +87,7 @@ class NPSProcessor:
         self.nps_data_qa = self.nps_data[['CUSTOMER_RESPONSE', 'provider_name','type_service']]
         print("Preprocessing completed.")
     
-    def classify_responses(self, labels):
+    def classify_responses(self, labels, nps_data_qa):
         """
         Classify customer responses using zero-shot classification.
 
@@ -95,24 +96,22 @@ class NPSProcessor:
         """
         print("Classifying responses...")
         detailed_scores = []
-        total_rows = len(self.nps_data_qa)
-        for start in range(0, total_rows, self.chunk_size):
-            chunk = self.nps_data_qa.iloc[start:start + self.chunk_size]
-            for i, row in chunk.iterrows():
-                input_text = row['CUSTOMER_RESPONSE']
-                if input_text.strip():
-                    try:
-                        model_dict = self.classifier(input_text, labels, multi_label=True)
-                        result_dict = dict(zip(model_dict.get('labels'), model_dict.get('scores')))
-                        score_dict = {'CUSTOMER_RESPONSE': input_text}
-                        score_dict.update(result_dict)
-                        detailed_scores.append(score_dict)
-                    except Exception as e:
-                        print(f"An error occurred at index {i} with text: {input_text}. Error: {e}")
+        print(len(nps_data_qa))
+        for i, row in nps_data_qa.iterrows():
+            input_text = row['CUSTOMER_RESPONSE']
+            if input_text.strip():
+                try:
+                    model_dict = self.classifier(input_text, labels, multi_label=True)
+                    result_dict = dict(zip(model_dict.get('labels'), model_dict.get('scores')))
+                    score_dict = {'CUSTOMER_RESPONSE': input_text}
+                    score_dict.update(result_dict)
+                    detailed_scores.append(score_dict)
+                except Exception as e:
+                    print(f"An error occurred at index {i} with text: {input_text}. Error: {e}")
         self.detailed_scores_df = pd.DataFrame(detailed_scores)
         print("Classification for chunk completed.")
     
-    def process_classifications(self):
+    def process_classifications(self,nps_data_qa):
         """
         Process the classified scores into structured categories and integrate them into the main data.
         """
@@ -217,18 +216,18 @@ class NPSProcessor:
                                                 'Medical_Staff', 'Receptionist_Front_Desk', 'Facility Quality', 'Medication_Quality', 
                                                 'medication, treatment, or drug related']]
         
-        self.nps_data_sample = self.nps_data_qa[['CUSTOMER_RESPONSE', 'type_service', 'provider_name']]
-        self.nps_data_qa = pd.merge(self.nps_data_sample, self.qa_data, on='CUSTOMER_RESPONSE')
+        self.nps_data_sample = nps_data_qa[['CUSTOMER_RESPONSE', 'type_service', 'provider_name']]
+        nps_data_qa = pd.merge(self.nps_data_sample, self.qa_data, on='CUSTOMER_RESPONSE')
         
         def find_columns_with_one(row):
             cols = row.index[row == 1].tolist()
             return ', '.join(cols)
         
-        self.nps_data_qa['main_topic'] = self.nps_data_qa[['Health_benefits_coverage', 'provider_quality', 'RCC_quality', 'provider_wait_times', 
+        nps_data_qa['main_topic'] = nps_data_qa[['Health_benefits_coverage', 'provider_quality', 'RCC_quality', 'provider_wait_times', 
                                                             'customer_education', 'provider_network', 'tech_issues']].apply(find_columns_with_one, axis=1)
-        self.nps_data_qa['sub_topic'] = self.nps_data_qa[['Medical_Staff', 'Receptionist_Front_Desk', 'Facility Quality', 'Medication_Quality']].apply(find_columns_with_one, axis=1)
+        nps_data_qa['sub_topic'] = nps_data_qa[['Medical_Staff', 'Receptionist_Front_Desk', 'Facility Quality', 'Medication_Quality']].apply(find_columns_with_one, axis=1)
         
-        self.final_df = self.nps_data_qa[['CUSTOMER_RESPONSE', 'main_topic', 'sub_topic', 'type_service']]
+        self.final_df = nps_data_qa[['CUSTOMER_RESPONSE', 'main_topic', 'sub_topic', 'type_service']]
         self.final_df['sub_topic'] = self.final_df['sub_topic'].replace('', 'generic')
         print("Processing classifications completed.")
     
@@ -240,9 +239,18 @@ class NPSProcessor:
         Parameters:
         file_name (str): The name of the file to save the results.
         """
-        print(len(self.final_df))
         with get_connection(schema=schema, profile=profile) as connection:
             if self.incremental is True:
                 upload_large_table(self.connection,self.final_df,'final_nps_op',schema=schema,if_exists='append')
             else:
                 upload_large_table(self.connection,self.final_df,'final_nps_op',schema=schema,if_exists='replace')
+
+    def run_in_chunks(self,labels):
+        total_rows = len(self.nps_data_qa)
+        for start in range(0, total_rows, self.chunk_size):
+            chunk = self.nps_data_qa.iloc[start:start + self.chunk_size]
+
+            self.classify_responses(labels,chunk)
+            self.process_classifications(chunk)
+            self.save_results()
+            print(f'run chunk number:{start}')

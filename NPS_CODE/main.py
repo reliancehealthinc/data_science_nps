@@ -10,9 +10,7 @@ if __name__ == "__main__":
               'time related', 'access related', 'doctor related', 'nurse related', 'clinic related', 'delivery related', 'customer service', 'delay', 
               'medication, treatment, or drug related']
     
-    nps_processor = NPSProcessor(database='DATA_SCIENCE_DB', schema='PUBLIC', role='SCIENTIST',warehouse='DATA_SCIENCE_WH',chunk_size=100,incremental=incremental)
+    nps_processor = NPSProcessor(database='DATA_SCIENCE_DB', schema='PUBLIC', role='SCIENTIST',warehouse='DATA_SCIENCE_WH',chunk_size=50,incremental=incremental)
     nps_processor.getcode()
     nps_processor.preprocess_data()
-    nps_processor.classify_responses(labels)
-    nps_processor.process_classifications()
-    nps_processor.save_results()
+    nps_processor.run_in_chunks(labels)
