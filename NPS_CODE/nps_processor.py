@@ -1,22 +1,17 @@
 import pandas as pd
 from datetime import datetime
 from transformers import pipeline
+import numpy as np
 import os,sys
 sys.path.insert(0, os.getenv('SNOWFLAKE_UTILS_PATH'))
 from data_science_utils import getcode, get_connection, upload_large_table
 
 schema = 'public'
 profile = 'dev'
-incremental = True
-
-if 'ubuntu' in os.getenv('SNOWFLAKE_UTILS_PATH'):
-    device = -1
-else:
-    device = 'mps'
 
 class NPSProcessor:
     
-    def __init__(self, database, schema, role, warehouse, chunk_size=100):
+    def __init__(self, database, schema, role, warehouse, chunk_size=100, incremental=True):
         """
         Initialize the NPSProcessor with Snowflake connection details and setup the classifier.
 
@@ -29,12 +24,12 @@ class NPSProcessor:
         """
         print("Initializing NPSProcessor...")
         self.connection = get_connection(database=database, schema=schema, role=role, warehouse=warehouse)
-        self.classifier = pipeline("zero-shot-classification", model="facebook/bart-large-mnli", device=device)
+        self.classifier = pipeline("zero-shot-classification", model="facebook/bart-large-mnli", device='mps')
         self.chunk_size = chunk_size
-        self.nps_data = pd.DataFrame()
-        self.provider_ranking_nps = pd.DataFrame()
-        self.max_encounter_date = '2023-10-31'  # Initialize with a very old date
-
+        self.incremental = incremental
+        self.nps_data = pd.DataFrame()   
+        print("NPSProcessor initialized.")
+       
     # def getcode(self):
     #     """
     #     Load data from Snowflake into DataFrames.
@@ -45,68 +40,50 @@ class NPSProcessor:
     #     self.provider_ranking_nps = getcode("SELECT * FROM DATA_SCIENCE_DB.PUBLIC.PROVIDER_RANKING_FINAL")
     #     print("Data loading completed.")
 
+
+
     def getcode(self):
         """
         Load data from Snowflake into DataFrames incrementally.
         """
         print("Loading data from Snowflake...")
 
-        # Query to fetch data where encounter_date is greater than the max_encounter_date
-        query = f"""
-        SELECT * 
-        FROM DATA_SCIENCE_DB.PUBLIC.NPS_PROVIDER_RAW 
-        WHERE encounter_date > '{self.max_encounter_date}'
+        # Fetch the latest provider_id and encounter_date from existing data if available
+
+        # Incremental load for NPS_PROVIDER_RAW based on Encounter_date
+        nps_query = f"""
+        SELECT DISTINCT
+              A.provider_name
+            , COALESCE("we_are_sorry_that_you_had_an_unpleasant_experience._can_you_please_provide_more_information_on_why_you_gave_that_rating?","we_are_glad_you_had_a_great_experience._can_you_please_provide_more_information_on_why_you_gave_that_rating?","thank_you_for_your_response._can_you_please_provide_more_information_on_why_you_gave_that_rating?") as customer_response
+            , B.type_service
+        FROM DATA_SCIENCE_DB.PUBLIC.NPS_PROVIDER_RAW A
+        LEFT JOIN DATA_SCIENCE_DB.PUBLIC.provider_domain B
+            ON A.provider_name = B.name
+        <inc_start> 
+        LEFT JOIN FINAL_NPS_OP C
+            ON COALESCE("we_are_sorry_that_you_had_an_unpleasant_experience._can_you_please_provide_more_information_on_why_you_gave_that_rating?"
+                ,"we_are_glad_you_had_a_great_experience._can_you_please_provide_more_information_on_why_you_gave_that_rating?"
+                ,"thank_you_for_your_response._can_you_please_provide_more_information_on_why_you_gave_that_rating?") = C.customer_response
+            AND B.type_service = C.type_service
+        WHERE C.customer_response IS NULL
+        <inc_end>
+        LIMIT 1000
         """
 
-        # Fetch the data
-        new_data = getcode(query)
+        nps_data  = getcode(nps_query,incremental=self.incremental,connection=self.connection)
+        self.nps_data = nps_data
 
-        # Convert encounter_date to datetime
-        new_data['encounter_date'] = pd.to_datetime(new_data['encounter_date'])
-
-        # Append new data to the existing data if not empty
-        if not new_data.empty:
-            self.nps_data = pd.concat([self.nps_data, new_data], ignore_index=True)
-            # Update the max_encounter_date
-            self.max_encounter_date = new_data['encounter_date'].max().strftime('%Y-%m-%d')
-            print(f"Data loaded with {len(new_data)} new records.")
-            print("\n\nnew max_encounter is", self.max_encounter_date)
-        else:
-            print("No new data found.")
-
-        # Load provider ranking data
-        self.provider_ranking_nps = getcode("SELECT * FROM DATA_SCIENCE_DB.PUBLIC.PROVIDER_RANKING_FINAL")
 
         print("Data loading completed.")
-
-
-
-
     
     def preprocess_data(self):
         """
         Preprocess the NPS data by merging relevant columns into a single customer response column.
         """
         print("Preprocessing data...")
-        def merge_columns(row):
-            return ' '.join(str(cell) for cell in row if not pd.isna(cell))
-        
-        self.nps_data['CUSTOMER_RESPONSE'] = self.nps_data[
-            ['we_are_sorry_that_you_had_an_unpleasant_experience._can_you_please_provide_more_information_on_why_you_gave_that_rating?',
-             'we_are_glad_you_had_a_great_experience._can_you_please_provide_more_information_on_why_you_gave_that_rating?',
-             'thank_you_for_your_response._can_you_please_provide_more_information_on_why_you_gave_that_rating?']
-        ].apply(merge_columns, axis=1)
-        
-        self.nps_data.drop(
-            columns=['we_are_sorry_that_you_had_an_unpleasant_experience._can_you_please_provide_more_information_on_why_you_gave_that_rating?',
-                     'we_are_glad_you_had_a_great_experience._can_you_please_provide_more_information_on_why_you_gave_that_rating?',
-                     'thank_you_for_your_response._can_you_please_provide_more_information_on_why_you_gave_that_rating?'], 
-            inplace=True
-        )
-        
-        self.nps_data_coi = self.nps_data[['CUSTOMER_RESPONSE', 'provider_name']]
-        self.provider_ranking_nps_coi = self.provider_ranking_nps[['provider_name', 'type_service', 'address']]
-        self.nps_data_qa = pd.merge(self.provider_ranking_nps_coi, self.nps_data_coi, on='provider_name').drop_duplicates()
+
+        self.nps_data['CUSTOMER_RESPONSE'] =  self.nps_data['customer_response']
+        self.nps_data_qa = self.nps_data[['CUSTOMER_RESPONSE', 'provider_name','type_service']]
         print("Preprocessing completed.")
     
     def classify_responses(self, labels):
@@ -263,9 +240,9 @@ class NPSProcessor:
         Parameters:
         file_name (str): The name of the file to save the results.
         """
-
+        print(len(self.final_df))
         with get_connection(schema=schema, profile=profile) as connection:
-            if incremental is True:
-                upload_large_table(connection,final_df,'FINAL_NPS_OP',schema=schema,if_exists='append')
+            if self.incremental is True:
+                upload_large_table(self.connection,self.final_df,'final_nps_op',schema=schema,if_exists='append')
             else:
-                upload_large_table(connection,final_df,'FINAL_NPS_OP',schema=schema,if_exists='replace')
+                upload_large_table(self.connection,self.final_df,'final_nps_op',schema=schema,if_exists='replace')
