@@ -8,6 +8,12 @@ from data_science_utils import getcode, get_connection, upload_large_table
 schema = 'public'
 profile = 'dev'
 incremental = True
+
+if 'ubuntu' in os.getenv('SNOWFLAKE_UTILS_PATH'):
+    device = -1
+else:
+    device = 'mps'
+
 class NPSProcessor:
     
     def __init__(self, database, schema, role, warehouse, chunk_size=100):
@@ -23,7 +29,7 @@ class NPSProcessor:
         """
         print("Initializing NPSProcessor...")
         self.connection = get_connection(database=database, schema=schema, role=role, warehouse=warehouse)
-        self.classifier = pipeline("zero-shot-classification", model="facebook/bart-large-mnli", device='mps')
+        self.classifier = pipeline("zero-shot-classification", model="facebook/bart-large-mnli", device=device)
         self.chunk_size = chunk_size
         self.nps_data = pd.DataFrame()
         self.provider_ranking_nps = pd.DataFrame()
