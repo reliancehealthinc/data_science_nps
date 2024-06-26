@@ -25,10 +25,10 @@ class NPSProcessor:
         self.connection = get_connection(database=database, schema=schema, role=role, warehouse=warehouse)
         self.classifier = pipeline("zero-shot-classification", model="facebook/bart-large-mnli", device='mps')
         self.chunk_size = chunk_size
-        self.provider_ranking_nps = pd.DataFrame()  # Initialize as an empty DataFrame
-        self.nps_data = pd.DataFrame()   
-        print("NPSProcessor initialized.")
-       
+        self.nps_data = pd.DataFrame()
+        self.provider_ranking_nps = pd.DataFrame()
+        self.max_encounter_date = '2023-10-31'  # Initialize with a very old date
+
     # def getcode(self):
     #     """
     #     Load data from Snowflake into DataFrames.
@@ -39,47 +39,43 @@ class NPSProcessor:
     #     self.provider_ranking_nps = getcode("SELECT * FROM DATA_SCIENCE_DB.PUBLIC.PROVIDER_RANKING_FINAL")
     #     print("Data loading completed.")
 
-
-
     def getcode(self):
         """
         Load data from Snowflake into DataFrames incrementally.
         """
         print("Loading data from Snowflake...")
 
-        # Fetch the latest provider_id and encounter_date from existing data if available
-        last_provider_id = None
-        last_encounter_date = None
-
-        if not self.nps_data.empty:
-            last_encounter_date = self.nps_data['Encounter_date'].max()
-            print(f"Last encounter_date in existing data: {last_encounter_date}")
-
-        # Incremental load for NPS_PROVIDER_RAW based on Encounter_date
-        nps_query = f"""
-        SELECT 
-            * 
-        FROM DATA_SCIENCE_DB.PUBLIC.NPS_PROVIDER_RAW
-        <inc_start> WHERE Encounter_date > '{last_encounter_date}' <inc_end>
-        ORDER BY Encounter_date ASC
+        # Query to fetch data where encounter_date is greater than the max_encounter_date
+        query = f"""
+        SELECT * 
+        FROM DATA_SCIENCE_DB.PUBLIC.NPS_PROVIDER_RAW 
+        WHERE encounter_date > '{self.max_encounter_date}'
         """
-        if last_encounter_date:
-            incremental = True
+
+        # Fetch the data
+        new_data = getcode(query)
+
+        # Convert encounter_date to datetime
+        new_data['encounter_date'] = pd.to_datetime(new_data['encounter_date'])
+
+        # Append new data to the existing data if not empty
+        if not new_data.empty:
+            self.nps_data = pd.concat([self.nps_data, new_data], ignore_index=True)
+            # Update the max_encounter_date
+            self.max_encounter_date = new_data['encounter_date'].max().strftime('%Y-%m-%d')
+            print(f"Data loaded with {len(new_data)} new records.")
+            print("\n\nnew max_encounter is", self.max_encounter_date)
         else:
-            incremental = False
+            print("No new data found.")
 
-        new_nps_data = getcode(nps_query,incremental=incremental)
-
-        if not new_nps_data.empty:
-            print(f"New records loaded from NPS_PROVIDER_RAW: {len(new_nps_data)}")
-            self.nps_data = pd.concat([self.nps_data, new_nps_data], ignore_index=True)
-
-        # Incremental load for PROVIDER_RANKING_FINAL based on provider_id
-        provider_ranking_query = "SELECT id as provider_id FROM DATA_SCIENCE_DB.PUBLIC.PROVIDER_DOMAIN"
-        new_provider_ranking_nps = getcode(provider_ranking_query)
-
+        # Load provider ranking data
+        self.provider_ranking_nps = getcode("SELECT * FROM DATA_SCIENCE_DB.PUBLIC.PROVIDER_RANKING_FINAL")
 
         print("Data loading completed.")
+
+
+
+
     
     def preprocess_data(self):
         """
